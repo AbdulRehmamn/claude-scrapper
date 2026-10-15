@@ -1,8 +1,8 @@
 @echo off
 setlocal
-title Directory Scraper - Setup
+title TheBlueBook Scraper - Setup
 echo ========================================
-echo   Directory Scraper - Setup
+echo   TheBlueBook.com Scraper - Setup
 echo ========================================
 echo.
 

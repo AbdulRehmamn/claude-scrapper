@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Generic Directory Scraper
-Works on any domain that permits crawling (checks robots.txt automatically).
-Includes legitimate Yelp Fusion API support instead of scraping Yelp directly.
+TheBlueBook.com Scraper
+Auto-detects pagination and extracts Name, Phone, and Email
 """
 
 import re
@@ -10,7 +9,6 @@ import csv
 import time
 import random
 import argparse
-import urllib.robotparser
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 
 import requests
@@ -30,60 +28,15 @@ PHONE_REGEX = re.compile(r'(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}')
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 "
-                  "DirectoryScraperBot/1.0 (+contact: your-email@example.com)",
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
 }
 
 NAME_TAG_CANDIDATES = ["h1", "h2", "h3", "h4", "a"]
-LISTING_HINTS = ["result", "listing", "company", "profile", "card", "member", "search-result", "list-item", "business"]
+LISTING_HINTS = ["result", "listing", "company", "profile", "card", "member", "search-result", "list-item"]
 
 _driver = None
-_robots_cache = {}
 
-
-# ---------------------------------------------------------------------------
-# Robots.txt compliance (non-negotiable safety layer)
-# ---------------------------------------------------------------------------
-
-def is_allowed(url, user_agent="*"):
-    """Checks robots.txt for the domain. Caches parser per-domain."""
-    parsed = urlparse(url)
-    domain = f"{parsed.scheme}://{parsed.netloc}"
-
-    if domain not in _robots_cache:
-        rp = urllib.robotparser.RobotFileParser()
-        rp.set_url(urljoin(domain, "/robots.txt"))
-        try:
-            rp.read()
-        except Exception:
-            # If robots.txt can't be read, default to cautious: allow (standard behavior)
-            # but log it so the user is aware.
-            print(f"[i] Could not read robots.txt for {domain}, proceeding cautiously.")
-        _robots_cache[domain] = rp
-
-    rp = _robots_cache[domain]
-    try:
-        allowed = rp.can_fetch(user_agent, url)
-    except Exception:
-        allowed = True
-    return allowed
-
-
-def get_crawl_delay(url, user_agent="*"):
-    parsed = urlparse(url)
-    domain = f"{parsed.scheme}://{parsed.netloc}"
-    rp = _robots_cache.get(domain)
-    if rp:
-        delay = rp.crawl_delay(user_agent)
-        if delay:
-            return float(delay)
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Fetching (requests -> Selenium fallback)
-# ---------------------------------------------------------------------------
 
 def get_session():
     s = requests.Session()
@@ -142,12 +95,8 @@ def looks_empty(html):
     return len(soup.get_text(strip=True)) < 200
 
 
-def auto_fetch(session, url, user_agent_token="*"):
-    """Checks robots.txt, then auto-detects whether JS rendering is needed."""
-    if not is_allowed(url, user_agent_token):
-        print(f"    [x] BLOCKED by robots.txt: {url}  (skipping — this site disallows crawling this path)")
-        return None
-
+def auto_fetch(session, url):
+    """Auto-detects whether the page needs JS rendering."""
     html = fetch_with_requests(session, url)
     if looks_empty(html):
         if SELENIUM_AVAILABLE:
@@ -157,10 +106,6 @@ def auto_fetch(session, url, user_agent_token="*"):
             print("    [!] Page looks empty but Selenium is not installed. Install it for full support.")
     return html
 
-
-# ---------------------------------------------------------------------------
-# Generic extraction
-# ---------------------------------------------------------------------------
 
 def extract_email_from_text(text):
     matches = [m for m in EMAIL_REGEX.findall(text)
@@ -210,7 +155,7 @@ def find_detail_links(soup, base_url):
     links = set()
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
-        if any(k in href for k in ["profile", "company", "contractor", "supplier", "detail", "member", "biz"]):
+        if any(k in href for k in ["profile", "company", "contractor", "supplier", "detail", "member"]):
             links.add(urljoin(base_url, a["href"]))
     return list(links)
 
@@ -244,85 +189,7 @@ def find_next_page_url(soup, current_url):
     return None
 
 
-# ---------------------------------------------------------------------------
-# Yelp — via official Fusion API (legitimate, no scraping/bypass involved)
-# ---------------------------------------------------------------------------
-
-def scrape_yelp_api(term, location, api_key, limit=50, output="results.csv"):
-    """
-    Uses Yelp's official Fusion API. Requires a free API key from:
-    https://www.yelp.com/developers/v3/manage_app
-    """
-    url = "https://api.yelp.com/v3/businesses/search"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    all_results = []
-    offset = 0
-    page_size = 50
-
-    f = open(output, "w", newline="", encoding="utf-8-sig")
-    writer = csv.DictWriter(f, fieldnames=["Name", "Phone", "Email", "Source URL"])
-    writer.writeheader()
-
-    try:
-        while len(all_results) < limit:
-            params = {"term": term, "location": location, "limit": min(page_size, limit - len(all_results)), "offset": offset}
-            print(f"    [>] Querying Yelp API: term='{term}' location='{location}' offset={offset}")
-            resp = requests.get(url, headers=headers, params=params, timeout=15)
-            if resp.status_code != 200:
-                print(f"    [!] Yelp API error {resp.status_code}: {resp.text}")
-                break
-            data = resp.json()
-            businesses = data.get("businesses", [])
-            if not businesses:
-                print("    [i] No more results.")
-                break
-
-            for b in businesses:
-                row = {
-                    "Name": b.get("name", ""),
-                    "Phone": b.get("display_phone", ""),
-                    "Email": "",  # Yelp API does not expose business emails (by design/privacy)
-                    "Source URL": b.get("url", ""),
-                }
-                all_results.append(row)
-                writer.writerow(row)
-                print(f"    -> {row['Name']} | {row['Phone']}")
-
-            offset += len(businesses)
-            f.flush()
-            time.sleep(0.5)
-    finally:
-        f.close()
-
-    print(f"\n✅ Done. {len(all_results)} records saved to {output}")
-    print("[i] Note: Yelp's public API does not provide business emails (they don't expose this data to anyone, including their own site's scrapers).")
-    return all_results
-
-
-# ---------------------------------------------------------------------------
-# Generic site crawler (works on any domain that allows it via robots.txt)
-# ---------------------------------------------------------------------------
-
 def scrape(start_url, max_pages=0, delay=1.5, output="results.csv", visit_details=True):
-    domain = urlparse(start_url).netloc
-    print(f"[i] Target domain: {domain}")
-    print(f"[i] Checking robots.txt for crawl permissions...")
-
-    if not is_allowed(start_url):
-        print(f"\n[x] This site's robots.txt disallows automated crawling of this URL.")
-        print(f"    URL: {start_url}")
-        print(f"    This tool will not proceed against the site's stated policy.")
-        print(f"    Options:")
-        print(f"      1. Check if {domain} offers an official API or data export.")
-        print(f"      2. Contact the site owner for permission/data access.")
-        print(f"      3. Try a different starting URL/path that robots.txt does allow.")
-        return []
-
-    crawl_delay = get_crawl_delay(start_url)
-    if crawl_delay:
-        print(f"[i] robots.txt specifies a crawl-delay of {crawl_delay}s — respecting it.")
-        delay = max(delay, crawl_delay)
-
     session = get_session()
     visited_pages, visited_details, all_results = set(), set(), []
     current_url = start_url
@@ -340,7 +207,7 @@ def scrape(start_url, max_pages=0, delay=1.5, output="results.csv", visit_detail
 
             html = auto_fetch(session, current_url)
             if not html:
-                print("[!] Could not retrieve page (blocked or failed), stopping.")
+                print("[!] Could not retrieve page, stopping.")
                 break
 
             soup = BeautifulSoup(html, "lxml")
@@ -363,9 +230,6 @@ def scrape(start_url, max_pages=0, delay=1.5, output="results.csv", visit_detail
 
                 for idx, link in enumerate(new_links, 1):
                     visited_details.add(link)
-                    if not is_allowed(link):
-                        print(f"    [x] Skipping (robots.txt disallows): {link}")
-                        continue
                     print(f"    [{idx}/{len(new_links)}] Visiting detail page...")
                     time.sleep(delay + random.uniform(0, 0.7))
                     d_html = auto_fetch(session, link)
@@ -401,10 +265,6 @@ def scrape(start_url, max_pages=0, delay=1.5, output="results.csv", visit_detail
                 print("[i] No further pages detected. Done.")
                 break
 
-            if not is_allowed(next_url):
-                print(f"[x] Next page blocked by robots.txt, stopping: {next_url}")
-                break
-
             current_url = next_url
             time.sleep(delay + random.uniform(0, 1))
     finally:
@@ -417,40 +277,20 @@ def scrape(start_url, max_pages=0, delay=1.5, output="results.csv", visit_detail
     return all_results
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def main():
-    parser = argparse.ArgumentParser(description="Generic directory scraper (robots.txt-compliant) with Yelp API support")
-    parser.add_argument("--mode", choices=["site", "yelp"], help="'site' = generic URL crawl, 'yelp' = Yelp Fusion API search")
-    parser.add_argument("--url", help="Starting URL (for --mode site)")
+    parser = argparse.ArgumentParser(description="TheBlueBook.com directory scraper")
+    parser.add_argument("--url", help="Starting search/listing URL")
     parser.add_argument("--pages", type=int, default=0, help="Max pages (0 = auto-detect all)")
     parser.add_argument("--output", default="results.csv")
     parser.add_argument("--delay", type=float, default=1.5)
     parser.add_argument("--no-details", action="store_true")
-    parser.add_argument("--yelp-key", help="Yelp Fusion API key")
-    parser.add_argument("--yelp-term", help="Search term, e.g. 'contractors'")
-    parser.add_argument("--yelp-location", help="Location, e.g. 'Chicago, IL'")
-    parser.add_argument("--yelp-limit", type=int, default=50)
     args = parser.parse_args()
 
-    mode = args.mode
-    if not mode:
-        print("Choose data source:")
-        print("  1. Any website URL (generic crawler, respects robots.txt)")
-        print("  2. Yelp (via official Yelp Fusion API)")
-        choice = input("Enter 1 or 2: ").strip()
-        mode = "yelp" if choice == "2" else "site"
+    url = args.url or input("Enter TheBlueBook.com search URL to scrape: ").strip()
+    if "thebluebook.com" not in url:
+        print("[!] Warning: this doesn't look like a thebluebook.com URL. Continuing anyway...")
 
-    if mode == "yelp":
-        api_key = args.yelp_key or input("Enter your Yelp Fusion API key (get one free at yelp.com/developers): ").strip()
-        term = args.yelp_term or input("Search term (e.g. 'contractors', 'plumbers'): ").strip()
-        location = args.yelp_location or input("Location (e.g. 'Chicago, IL'): ").strip()
-        scrape_yelp_api(term, location, api_key, args.yelp_limit, args.output)
-    else:
-        url = args.url or input("Enter the URL to scrape: ").strip()
-        scrape(url, args.pages, args.delay, args.output, not args.no_details)
+    scrape(url, args.pages, args.delay, args.output, not args.no_details)
 
 
 if __name__ == "__main__":
